@@ -214,10 +214,63 @@ jobs:
         # 过滤掉特殊前缀，只处理真正的包名
         PACKAGES=$(echo "$RAW" | sed 's/,/ /g' | tr ' ' '\n' | grep -v '^__ip__' | grep -v '^__hostname__' | tr '\n' ' ')
 
-        # 检测是否选了 turboacc，如果选了则先执行安装脚本
+        # 检测是否选了 turboacc；安装失败时立即终止，避免带着不完整补丁继续编译
         if echo "$PACKAGES" | grep -qw "luci-app-turboacc"; then
-          echo "⚡ 检测到 luci-app-turboacc，执行 turboacc 安装脚本..."
-          curl -sSL https://raw.githubusercontent.com/mufeng05/turboacc/main/add_turboacc.sh -o add_turboacc.sh && bash add_turboacc.sh || echo "⚠️ turboacc 脚本执行失败，跳过"
+          echo "⚡ 检测到 luci-app-turboacc，执行 TurboACC 安装脚本..."
+
+          curl --fail --show-error --location \
+            https://raw.githubusercontent.com/mufeng05/turboacc/main/add_turboacc.sh \
+            -o add_turboacc.sh
+
+          bash add_turboacc.sh
+
+          echo "🔧 修正 Shortcut-FE 对 Linux 6.12 的补丁上下文..."
+
+          python3 - <<'PY'
+from pathlib import Path
+
+patch = Path(
+    "target/linux/generic/hack-6.12/"
+    "953-net-patch-linux-kernel-to-support-shortcut-fe.patch"
+)
+
+if not patch.is_file():
+    raise SystemExit(f"ERROR: 找不到补丁文件：{patch}")
+
+text = patch.read_text()
+
+old = """@@ -1012,6 +1012,9 @@ struct sk_buff {
+ \t__u8\t\t\tcsum_not_inet:1;
+ #endif
+ \t__u8\t\t\tunreadable:1;
++#ifdef CONFIG_SHORTCUT_FE
++\t__u8\t\t\tfast_forwarded:1;
++#endif
+ \t__u8\t\t\ttc_depth:2;
+ #if defined(CONFIG_NET_SCHED) || defined(CONFIG_NET_XGRESS)
+ \t__u16\t\t\ttc_index;\t/* traffic control index */
+"""
+
+new = """@@ -1012,5 +1012,8 @@ struct sk_buff {
+ \t__u8\t\t\tcsum_not_inet:1;
+ #endif
+ \t__u8\t\t\tunreadable:1;
++#ifdef CONFIG_SHORTCUT_FE
++\t__u8\t\t\tfast_forwarded:1;
++#endif
+ #if defined(CONFIG_NET_SCHED) || defined(CONFIG_NET_XGRESS)
+ \t__u16\t\t\ttc_index;\t/* traffic control index */
+"""
+
+if text.count(old) != 1:
+    raise SystemExit(
+        "ERROR: 953 补丁内容与预期不一致，停止修改。"
+        "请检查 TurboACC 补丁版本。"
+    )
+
+patch.write_text(text.replace(old, new, 1))
+print("OK: 已修正 953 补丁，保留 fast_forwarded 字段。")
+PY
         fi
 
         for pkg in $PACKAGES; do
