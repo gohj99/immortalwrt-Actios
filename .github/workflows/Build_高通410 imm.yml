@@ -309,7 +309,7 @@ jobs:
        cd openwrt
        make defconfig
        if [ "${{ github.event.inputs.profile }}" = "ufi003" ]; then
-         for package in rmtfs qrtr-ns kmod-qcom-rproc-modem qcom-msm8916-modem-openstick-ufi003-firmware; do
+         for package in libudev-zero rmtfs qrtr-ns kmod-qcom-rproc-modem qcom-msm8916-modem-openstick-ufi003-firmware; do
            if ! grep -qx "CONFIG_PACKAGE_${package}=y" .config; then
              echo "::error::UFI003 modem package CONFIG_PACKAGE_${package} was dropped by defconfig"
              exit 1
@@ -356,7 +356,7 @@ jobs:
             echo "::error::No firmware package manifest was generated"
             exit 1
           fi
-          for package in rmtfs qrtr-ns qcom-msm8916-modem-openstick-ufi003-firmware; do
+          for package in libudev-zero rmtfs qrtr-ns qcom-msm8916-modem-openstick-ufi003-firmware; do
             if ! grep -q "^${package} -" "$MANIFEST"; then
               echo "::error::UFI003 firmware manifest is missing required package: ${package}"
               exit 1
