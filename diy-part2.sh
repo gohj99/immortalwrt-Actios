@@ -6,6 +6,21 @@
 # 版权: (c) 2019-2024 P3TERX <https://p3terx.com>
 # 基于 MIT 开源协议，详见 /LICENSE
 
+# 当前 immortalwrt/packages 的 libudev-zero 声明了 +libevdev，
+# 但 libevdev 依赖 feeds 中不存在的 input-support，导致 rmtfs 被 defconfig 清除。
+# rmtfs 只链接 libudev，不需要 libevdev；移除这个错误的可选依赖。
+UDEV_ZERO_MK=package/feeds/packages/libudev-zero/Makefile
+if [ ! -f "$UDEV_ZERO_MK" ]; then
+  echo "ERROR: expected libudev-zero package Makefile at $UDEV_ZERO_MK"
+  exit 1
+fi
+sed -i '/^[[:space:]]*DEPENDS:=[[:space:]]*+libevdev[[:space:]]*$/d' "$UDEV_ZERO_MK"
+if grep -q 'DEPENDS:.*libevdev' "$UDEV_ZERO_MK"; then
+  echo "ERROR: failed to remove the unsupported libevdev dependency from libudev-zero"
+  exit 1
+fi
+echo "OK: removed libudev-zero's unsupported libevdev dependency"
+
 # 修改默认IP地址
 #sed -i 's/192.168.1.1/192.168.100.1/g' package/base-files/files/bin/config_generate
 
