@@ -224,6 +224,14 @@ jobs:
 
           bash add_turboacc.sh
 
+          # 上游已包含 Full Cone 支持补丁 002；TurboACC 又复制同一功能的 100 补丁，会造成重复应用冲突。
+          NFT_PATCH_DIR="package/network/utils/nftables/patches"
+          if [ -f "$NFT_PATCH_DIR/002-nftables-add-fullcone-expression-support.patch" ] && \
+             [ -f "$NFT_PATCH_DIR/100-nftables-add-fullcone-expression-support.patch" ]; then
+            echo "⚠️ 检测到重复的 Full Cone 补丁，保留上游 002，移除 TurboACC 的重复 100"
+            rm -f "$NFT_PATCH_DIR/100-nftables-add-fullcone-expression-support.patch"
+          fi
+
           echo "🔧 修正 Shortcut-FE 对 Linux 6.12 的补丁上下文..."
 
         python3 - <<'PY'
