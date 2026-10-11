@@ -308,6 +308,14 @@ jobs:
       run: |
        cd openwrt
        make defconfig
+       if [ "${{ github.event.inputs.profile }}" = "ufi003" ]; then
+         for package in rmtfs qrtr-ns kmod-qcom-rproc-modem qcom-msm8916-modem-openstick-ufi003-firmware; do
+           if ! grep -qx "CONFIG_PACKAGE_${package}=y" .config; then
+             echo "::error::UFI003 modem package CONFIG_PACKAGE_${package} was dropped by defconfig"
+             exit 1
+           fi
+         done
+       fi
        
     - name: Download package
       id: package
@@ -341,6 +349,20 @@ jobs:
         cd openwrt
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 V=s
+        PROFILE=${{ github.event.inputs.profile }}
+        if [ "$PROFILE" = "ufi003" ]; then
+          MANIFEST=$(find bin/targets -maxdepth 4 -type f -name '*.manifest' -print -quit)
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::No firmware package manifest was generated"
+            exit 1
+          fi
+          for package in rmtfs qrtr-ns qcom-msm8916-modem-openstick-ufi003-firmware; do
+            if ! grep -q "^${package} -" "$MANIFEST"; then
+              echo "::error::UFI003 firmware manifest is missing required package: ${package}"
+              exit 1
+            fi
+          done
+        fi
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
