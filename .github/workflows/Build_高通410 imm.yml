@@ -162,6 +162,14 @@ jobs:
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
+        # __qmodem__ is a build marker, not an OpenWrt package name. Only
+        # enable the QModem feed when it appears as a complete input token.
+        RAW_EXTRA='${{ inputs.extra_packages }}'
+        if printf '%s\n' "$RAW_EXTRA" | tr ',' ' ' | tr -s '[:space:]' '\n' | grep -Fxq '__qmodem__'; then
+          QMODEM_FEED='src-git qmodem https://github.com/FUjr/QModem.git;main'
+          grep -Fqx "$QMODEM_FEED" feeds.conf.default || echo "$QMODEM_FEED" >> feeds.conf.default
+          echo "✅ __qmodem__ detected; QModem feed enabled"
+        fi
         $GITHUB_WORKSPACE/$DIY_P1_SH
         
 
@@ -211,8 +219,18 @@ jobs:
           sed -i "s/option hostname 'ImmortalWrt'/option hostname '$CUSTOM_HOSTNAME'/" package/base-files/files/etc/config/system 2>/dev/null || true
         fi
 
-        # 过滤掉特殊前缀，只处理真正的包名
-        PACKAGES=$(echo "$RAW" | sed 's/,/ /g' | tr ' ' '\n' | grep -v '^__ip__' | grep -v '^__hostname__' | tr '\n' ' ')
+        # 过滤掉特殊标记，只处理真正的包名。
+        # __qmodem__ 必须是独立 token，不能被当成 CONFIG_PACKAGE 名称。
+        QMODEM_SELECTED=0
+        if printf '%s\n' "$RAW" | tr ',' ' ' | tr -s '[:space:]' '\n' | grep -Fxq '__qmodem__'; then
+          QMODEM_SELECTED=1
+        fi
+        PACKAGES=$(printf '%s\n' "$RAW" | sed 's/,/ /g' | tr -s '[:space:]' '\n' \
+          | grep -v -E '^(__ip__|__hostname__)' | grep -v -x '__qmodem__' | sed '/^$/d' | tr '\n' ' ' || true)
+        if [ "$QMODEM_SELECTED" -eq 1 ]; then
+          PACKAGES="$PACKAGES qmodem luci-app-qmodem-next"
+          echo "✅ QModem selected: qmodem luci-app-qmodem-next"
+        fi
 
         # 检测是否选了 turboacc；安装失败时立即终止，避免带着不完整补丁继续编译
         if echo "$PACKAGES" | grep -qw "luci-app-turboacc"; then
@@ -446,7 +464,16 @@ jobs:
         DISPLAY_IP=${CUSTOM_IP:-192.168.1.1}
         DISPLAY_HOSTNAME=${CUSTOM_HOSTNAME:-ImmortalWrt}
         # 过滤掉特殊前缀，只显示真正的包名
-        EXTRA=$(echo "$RAW" | sed 's/,/ /g' | tr ' ' '\n' | grep -v '^__ip__' | grep -v '^__hostname__' | sed '/^$/d')
+        EXTRA=$(printf '%s\n' "$RAW" | sed 's/,/ /g' | tr -s '[:space:]' '\n' \
+          | grep -v -E '^(__ip__|__hostname__)' | grep -v -x '__qmodem__' | sed '/^$/d' || true)
+        if printf '%s\n' "$RAW" | sed 's/,/ /g' | tr -s '[:space:]' '\n' | grep -Fxq '__qmodem__'; then
+          if [ -n "$EXTRA" ]; then
+            EXTRA="$EXTRA
+qmodem (luci-app-qmodem-next)"
+          else
+            EXTRA='qmodem (luci-app-qmodem-next)'
+          fi
+        fi
 
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")-${PROFILE}" >> $GITHUB_OUTPUT
         touch release.txt
