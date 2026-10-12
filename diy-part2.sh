@@ -25,12 +25,25 @@ echo "OK: removed libudev-zero's unsupported libevdev dependency"
 # protocol does not import that modem-side value automatically. Resolve the
 # APN from the active SIM on first boot instead of baking in one carrier.
 if grep -q '^CONFIG_TARGET_msm89xx_msm8916_DEVICE_openstick-ufi003=y$' .config; then
-  OPENSTICK_TWEAK=package/feeds/openstick/utils/openstick-tweaks/files/openstick_tweak
-  if [ ! -f "$OPENSTICK_TWEAK" ]; then
-    echo "ERROR: expected OpenStick defaults at $OPENSTICK_TWEAK"
+  # scripts/feeds installs a package from utils/openstick-tweaks as
+  # package/feeds/openstick/openstick-tweaks (the category is omitted).
+  # Keep the source-tree path as a fallback for alternate feed installers.
+  OPENSTICK_TWEAK=""
+  for candidate in \
+    package/feeds/openstick/openstick-tweaks/files/openstick_tweak \
+    package/feeds/openstick/utils/openstick-tweaks/files/openstick_tweak \
+    feeds/openstick/utils/openstick-tweaks/files/openstick_tweak; do
+    if [ -f "$candidate" ]; then
+      OPENSTICK_TWEAK="$candidate"
+      break
+    fi
+  done
+  if [ -z "$OPENSTICK_TWEAK" ]; then
+    echo "ERROR: could not find OpenStick defaults (openstick_tweak) after feed installation"
     exit 1
   fi
   APN_BLOCK=$(cat <<'EOF'
+# Select the data APN from the SIM operator or modem profile.
 # A normal SIM exposes IMSI/MCC/MNC, not an APN string. Read the modem's
 # configured initial bearer APN first; use the operator table only as a
 # fallback for cards whose modem profile does not expose one.
