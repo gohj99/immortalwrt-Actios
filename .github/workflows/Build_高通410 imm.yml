@@ -468,8 +468,7 @@ jobs:
           | grep -v -E '^(__ip__|__hostname__)' | grep -v -x '__qmodem__' | sed '/^$/d' || true)
         if printf '%s\n' "$RAW" | sed 's/,/ /g' | tr -s '[:space:]' '\n' | grep -Fxq '__qmodem__'; then
           if [ -n "$EXTRA" ]; then
-            EXTRA="$EXTRA
-qmodem (luci-app-qmodem-next)"
+            EXTRA="${EXTRA}"$'\nqmodem (luci-app-qmodem-next)'
           else
             EXTRA='qmodem (luci-app-qmodem-next)'
           fi
