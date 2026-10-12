@@ -21,6 +21,83 @@ if grep -q 'DEPENDS:.*libevdev' "$UDEV_ZERO_MK"; then
 fi
 echo "OK: removed libudev-zero's unsupported libevdev dependency"
 
+# The UFI003 modem reports an initial EPS APN, but netifd's modemmanager
+# protocol does not import that modem-side value automatically. Resolve the
+# APN from the active SIM on first boot instead of baking in one carrier.
+if grep -q '^CONFIG_TARGET_msm89xx_msm8916_DEVICE_openstick-ufi003=y$' .config; then
+  OPENSTICK_TWEAK=package/feeds/openstick/utils/openstick-tweaks/files/openstick_tweak
+  if [ ! -f "$OPENSTICK_TWEAK" ]; then
+    echo "ERROR: expected OpenStick defaults at $OPENSTICK_TWEAK"
+    exit 1
+  fi
+  APN_BLOCK=$(cat <<'EOF'
+# A normal SIM exposes IMSI/MCC/MNC, not an APN string. Read the modem's
+# configured initial bearer APN first; use the operator table only as a
+# fallback for cards whose modem profile does not expose one.
+SIM_OPERATOR=""
+MODEM_APN=""
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  SIM_OPERATOR="$(mmcli -i any --output-keyvalue 2>/dev/null | grep 'sim.properties.operator-code' | cut -d: -f2- | tr -d '[:space:]' | head -n1)"
+  MODEM_APN="$(mmcli -m any --output-keyvalue 2>/dev/null | grep 'modem.3gpp.eps.initial-bearer-apn' | cut -d: -f2- | tr -d '[:space:]' | head -n1)"
+  [ -n "$SIM_OPERATOR" ] && [ "$SIM_OPERATOR" != "--" ] && break
+  sleep 2
+done
+
+# Prefer the modem's configured initial bearer APN. This path is independent
+# of country and operator, so a non-Chinese carrier works when its modem
+# profile supplies an APN.
+case "$MODEM_APN" in
+  ""|"--")
+    case "$SIM_OPERATOR" in
+      46000|46002|46004|46007|46008|46015|46020)
+        SIM_APN='cmnet'
+        ;;
+      46001|46006|46009)
+        SIM_APN='3gnet'
+        ;;
+      46003|46005|46011|46012)
+        SIM_APN='ctlte'
+        ;;
+      46013)
+        SIM_APN='cbnet'
+        ;;
+      *)
+        SIM_APN=""
+        ;;
+    esac
+    ;;
+  *)
+    SIM_APN="$MODEM_APN"
+    ;;
+esac
+
+if [ -n "$SIM_APN" ]; then
+  uci set network.modem.apn="$SIM_APN"
+else
+  uci -q delete network.modem.apn
+fi
+uci set network.modem.iptype='ipv4'
+EOF
+)
+
+  if ! grep -q '^# Select the data APN from the SIM operator' "$OPENSTICK_TWEAK"; then
+    awk -v apn_block="$APN_BLOCK" '
+      !inserted && $0 ~ /^uci set network[.]modem[.]iptype=/ && $0 ~ /ipv4v6/ {
+        printf "%s\n", apn_block
+        inserted=1
+        next
+      }
+      { print }
+    ' "$OPENSTICK_TWEAK" > "$OPENSTICK_TWEAK.tmp" && mv "$OPENSTICK_TWEAK.tmp" "$OPENSTICK_TWEAK"
+  fi
+
+  grep -q '^# Select the data APN from the SIM operator' "$OPENSTICK_TWEAK" || {
+    echo "ERROR: failed to add dynamic SIM APN selection to OpenStick defaults"
+    exit 1
+  }
+  echo "OK: configured dynamic SIM APN selection for UFI003"
+fi
+
 # 修改默认IP地址
 #sed -i 's/192.168.1.1/192.168.100.1/g' package/base-files/files/bin/config_generate
 
