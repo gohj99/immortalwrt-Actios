@@ -22,8 +22,9 @@ fi
 echo "OK: removed libudev-zero's unsupported libevdev dependency"
 
 # The UFI003 modem reports an initial EPS APN, but netifd's modemmanager
-# protocol does not import that modem-side value automatically. Resolve the
-# APN from the active SIM on first boot instead of baking in one carrier.
+# protocol does not import that modem-side value automatically. Install an APN
+# synchronizer into the existing SIM-refresh monitor instead of querying the
+# modem from uci-defaults, which runs before ModemManager is ready.
 if grep -q '^CONFIG_TARGET_msm89xx_msm8916_DEVICE_openstick-ufi003=y$' .config; then
   # scripts/feeds installs a package from utils/openstick-tweaks as
   # package/feeds/openstick/openstick-tweaks (the category is omitted).
@@ -43,57 +44,13 @@ if grep -q '^CONFIG_TARGET_msm89xx_msm8916_DEVICE_openstick-ufi003=y$' .config; 
     exit 1
   fi
   APN_BLOCK=$(cat <<'EOF'
-# Select the data APN from the SIM operator or modem profile.
-# A normal SIM exposes IMSI/MCC/MNC, not an APN string. Read the modem's
-# configured initial bearer APN first; use the operator table only as a
-# fallback for cards whose modem profile does not expose one.
-SIM_OPERATOR=""
-MODEM_APN=""
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  SIM_OPERATOR="$(mmcli -i any --output-keyvalue 2>/dev/null | grep 'sim.properties.operator-code' | cut -d: -f2- | tr -d '[:space:]' | head -n1)"
-  MODEM_APN="$(mmcli -m any --output-keyvalue 2>/dev/null | grep 'modem.3gpp.eps.initial-bearer-apn' | cut -d: -f2- | tr -d '[:space:]' | head -n1)"
-  [ -n "$SIM_OPERATOR" ] && [ "$SIM_OPERATOR" != "--" ] && break
-  sleep 2
-done
-
-# Prefer the modem's configured initial bearer APN. This path is independent
-# of country and operator, so a non-Chinese carrier works when its modem
-# profile supplies an APN.
-case "$MODEM_APN" in
-  ""|"--")
-    case "$SIM_OPERATOR" in
-      46000|46002|46004|46007|46008|46015|46020)
-        SIM_APN='cmnet'
-        ;;
-      46001|46006|46009)
-        SIM_APN='3gnet'
-        ;;
-      46003|46005|46011|46012)
-        SIM_APN='ctlte'
-        ;;
-      46013)
-        SIM_APN='cbnet'
-        ;;
-      *)
-        SIM_APN=""
-        ;;
-    esac
-    ;;
-  *)
-    SIM_APN="$MODEM_APN"
-    ;;
-esac
-
-if [ -n "$SIM_APN" ]; then
-  uci set network.modem.apn="$SIM_APN"
-else
-  uci -q delete network.modem.apn
-fi
+# APN selection is asynchronous. qmi_auto_activate invokes
+# openstick-apn-sync when the SIM becomes ready or changes.
 uci set network.modem.iptype='ipv4'
 EOF
 )
 
-  if ! grep -q '^# Select the data APN from the SIM operator' "$OPENSTICK_TWEAK"; then
+  if ! grep -q '^# APN selection is asynchronous' "$OPENSTICK_TWEAK"; then
     awk -v apn_block="$APN_BLOCK" '
       !inserted && $0 ~ /^uci set network[.]modem[.]iptype=/ && $0 ~ /ipv4v6/ {
         printf "%s\n", apn_block
@@ -104,10 +61,66 @@ EOF
     ' "$OPENSTICK_TWEAK" > "$OPENSTICK_TWEAK.tmp" && mv "$OPENSTICK_TWEAK.tmp" "$OPENSTICK_TWEAK"
   fi
 
-  grep -q '^# Select the data APN from the SIM operator' "$OPENSTICK_TWEAK" || {
+  grep -q '^# APN selection is asynchronous' "$OPENSTICK_TWEAK" || {
     echo "ERROR: failed to add dynamic SIM APN selection to OpenStick defaults"
     exit 1
   }
+  # The firmware uses opkg, not Alpine's apk. Leaving this command in the
+  # uci-default script makes it return 127, so OpenWrt runs it on every boot.
+  sed -i '/apk del openstick-tweaks/d' "$OPENSTICK_TWEAK"
+
+  APN_SYNC=files/usr/bin/openstick-apn-sync
+  if [ ! -f "$APN_SYNC" ]; then
+    echo "ERROR: missing UFI003 APN synchronizer: $APN_SYNC"
+    exit 1
+  fi
+  chmod 0755 "$APN_SYNC"
+
+  QMI_AUTO_ACTIVATE=""
+  for candidate in \
+    package/feeds/openstick/qmi-modem-410-init/files/qmi_auto_activate.sh \
+    package/feeds/openstick/utils/qmi-modem-410-init/files/qmi_auto_activate.sh \
+    feeds/openstick/utils/qmi-modem-410-init/files/qmi_auto_activate.sh; do
+    if [ -f "$candidate" ]; then
+      QMI_AUTO_ACTIVATE="$candidate"
+      break
+    fi
+  done
+  if [ -z "$QMI_AUTO_ACTIVATE" ]; then
+    echo "ERROR: could not find qmi_auto_activate.sh after feed installation"
+    exit 1
+  fi
+
+  if ! grep -q 'openstick-apn-sync-hook' "$QMI_AUTO_ACTIVATE"; then
+    awk '
+      !startup_hook && /^echo "设备: / {
+        print
+        print "# openstick-apn-sync-hook: initial SIM present at boot"
+        print "/usr/bin/openstick-apn-sync --wait 120 >/dev/null 2>&1 &"
+        startup_hook=1
+        next
+      }
+      {
+        print
+        if (!refresh_hook && $0 ~ /^[[:space:]]*start_activation_background[[:space:]]*$/) {
+          print "                # openstick-apn-sync-hook: SIM inserted or replaced"
+          print "                /usr/bin/openstick-apn-sync --expect-change --wait 120 >/dev/null 2>&1 &"
+          refresh_hook=1
+        }
+      }
+      END {
+        if (!startup_hook || !refresh_hook)
+          exit 2
+      }
+    ' "$QMI_AUTO_ACTIVATE" > "$QMI_AUTO_ACTIVATE.tmp" && \
+      mv "$QMI_AUTO_ACTIVATE.tmp" "$QMI_AUTO_ACTIVATE"
+  fi
+
+  grep -q 'initial SIM present at boot' "$QMI_AUTO_ACTIVATE" && \
+    grep -q 'SIM inserted or replaced' "$QMI_AUTO_ACTIVATE" || {
+      echo "ERROR: failed to hook UFI003 APN synchronization into qmi_auto_activate"
+      exit 1
+    }
   echo "OK: configured dynamic SIM APN selection for UFI003"
 fi
 

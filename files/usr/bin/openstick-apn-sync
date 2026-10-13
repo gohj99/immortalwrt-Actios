@@ -1,0 +1,165 @@
+#!/bin/sh
+
+# Synchronize the netifd ModemManager APN after qcom-soc reports a SIM refresh.
+# The caller may invoke this script repeatedly; a lock keeps one probe active.
+
+TAG="openstick-apn"
+RUN_DIR="${RUN_DIR:-/var/run}"
+LOCK_DIR="$RUN_DIR/openstick-apn-sync.lock"
+QMI_DEVICE="${QMI_DEVICE:-/dev/wwan0qmi0}"
+WAIT_SECONDS=120
+RETRY_DELAY=2
+EXPECT_CHANGE=0
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--wait)
+			[ "$#" -ge 2 ] || exit 2
+			WAIT_SECONDS="$2"
+			shift 2
+			;;
+		--expect-change)
+			EXPECT_CHANGE=1
+			shift
+			;;
+		*)
+			exit 2
+			;;
+	esac
+done
+
+case "$WAIT_SECONDS" in
+	''|*[!0-9]*) exit 2 ;;
+esac
+
+mkdir -p "$RUN_DIR"
+mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+
+log()
+{
+	logger -t "$TAG" "$*"
+}
+
+read_mm_value()
+{
+	printf '%s\n' "$1" | grep -F "$2" | head -n 1 | cut -d: -f2- | tr -d '[:space:]'
+}
+
+choose_apn()
+{
+	# Known Chinese operators are more reliable than a stale modem profile
+	# after a SIM swap. Unknown operators fall back to the modem profile.
+	case "$1" in
+		46000|46002|46004|46007|46008|46015|46020)
+			printf '%s\n' cmnet
+			;;
+		46001|46006|46009)
+			printf '%s\n' 3gnet
+			;;
+		46003|46005|46011|46012)
+			printf '%s\n' ctlte
+			;;
+		46013)
+			printf '%s\n' cbnet
+			;;
+		*)
+			printf '%s\n' "$2"
+			;;
+	esac
+}
+
+previous_identity="$(uci -q get openstick_apn.main.sim_identity 2>/dev/null || true)"
+elapsed=0
+while [ "$elapsed" -le "$WAIT_SECONDS" ]; do
+	imsi=""
+	operator=""
+	profile_apn=""
+	desired_apn=""
+
+	# QMI becomes usable before ModemManager exports the modem. Reading the IMSI
+	# here lets the APN land in UCI before netifd reconnects after a SIM refresh.
+	if command -v qmicli >/dev/null 2>&1 && [ -e "$QMI_DEVICE" ]; then
+		qmi_imsi="$(qmicli -d "$QMI_DEVICE" -p --dms-uim-get-imsi 2>/dev/null || true)"
+		imsi="$(printf '%s\n' "$qmi_imsi" | awk -F "'" '/^[[:space:]]*IMSI:/ { print $2; exit }')"
+		case "$imsi" in
+			460*) operator="$(printf '%.5s' "$imsi")" ;;
+		esac
+
+		qmi_profile="$(qmicli -d "$QMI_DEVICE" -p --wds-get-default-settings=3gpp 2>/dev/null || true)"
+		profile_apn="$(printf '%s\n' "$qmi_profile" | awk -F "'" '/^[[:space:]]*APN:/ { print $2; exit }')"
+	fi
+
+	if command -v mmcli >/dev/null 2>&1; then
+		sim_info="$(mmcli -i any --output-keyvalue 2>/dev/null || true)"
+		modem_info="$(mmcli -m any --output-keyvalue 2>/dev/null || true)"
+		mm_imsi="$(read_mm_value "$sim_info" 'sim.properties.imsi')"
+		mm_operator="$(read_mm_value "$sim_info" 'sim.properties.operator-code')"
+		mm_profile_apn="$(read_mm_value "$modem_info" 'modem.3gpp.eps.initial-bearer.settings.apn')"
+		[ -z "$imsi" ] && imsi="$mm_imsi"
+		[ -z "$operator" ] && operator="$mm_operator"
+		[ -z "$profile_apn" ] && profile_apn="$mm_profile_apn"
+
+		[ "$imsi" = "--" ] && imsi=""
+		[ "$operator" = "--" ] && operator=""
+		[ "$profile_apn" = "--" ] && profile_apn=""
+
+	fi
+
+	identity="${imsi:-$operator}"
+	if [ "$EXPECT_CHANGE" -eq 1 ] && [ -n "$previous_identity" ] && \
+	   [ "$identity" = "$previous_identity" ]; then
+		desired_apn=""
+	elif [ -n "$identity" ]; then
+		desired_apn="$(choose_apn "$operator" "$profile_apn")"
+		[ -z "$desired_apn" ] || break
+	fi
+
+	[ "$elapsed" -ge "$WAIT_SECONDS" ] && break
+	sleep "$RETRY_DELAY"
+	elapsed=$((elapsed + RETRY_DELAY))
+done
+
+if [ -z "${desired_apn:-}" ]; then
+	log "SIM/APN was not ready after ${WAIT_SECONDS}s; keeping the current APN"
+	exit 0
+fi
+
+identity="${imsi:-$operator}"
+current_apn="$(uci -q get network.modem.apn 2>/dev/null || true)"
+managed_apn="$(uci -q get openstick_apn.main.managed_apn 2>/dev/null || true)"
+apn_changed=0
+
+# A non-empty value different from the last automatically managed APN is a
+# user override (for example an IoT/private APN). Never replace it implicitly.
+if [ -n "$current_apn" ] && {
+	[ -z "$managed_apn" ] || [ "$current_apn" != "$managed_apn" ];
+}; then
+	log "preserving manually configured APN '$current_apn' for SIM $identity"
+	exit 0
+fi
+
+if [ "$current_apn" != "$desired_apn" ]; then
+	uci set network.modem.apn="$desired_apn"
+	uci commit network
+	apn_changed=1
+	log "configured APN '$desired_apn' for operator ${operator:-unknown}"
+fi
+
+uci -q get openstick_apn.main >/dev/null 2>&1 || uci set openstick_apn.main='state'
+uci set openstick_apn.main.managed_apn="$desired_apn"
+uci set openstick_apn.main.sim_identity="$identity"
+uci set openstick_apn.main.operator="${operator:-unknown}"
+uci commit openstick_apn
+
+# Apply a changed APN to the current bearer. A network reload is intentionally
+# skipped when the value was already correct or when a manual APN is present.
+if [ "$apn_changed" -eq 1 ]; then
+	if command -v ubus >/dev/null 2>&1; then
+		ubus call network reload >/dev/null 2>&1 || true
+	elif [ -x /etc/init.d/network ]; then
+		/etc/init.d/network reload >/dev/null 2>&1 || true
+	fi
+fi
+
+exit 0
